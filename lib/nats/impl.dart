@@ -1,73 +1,4 @@
-import 'dart:async';
-import 'dart:convert';
-import 'wire.dart';
-
-class Message {
-  final String subject;
-  final String replyTo;
-  final Iterable<int> data;
-  final Subscription subscription;
-
-  Message(this.subject, this.replyTo, this.data, this.subscription);
-
-  String get dataAsString => utf8.decode(data);
-
-  String toString() => '$subject $dataAsString';
-}
-
-class Subscription {
-  final String subscriptionId;
-
-  final String subject;
-
-  final String queueGroup;
-
-  final _controller = StreamController<Message>();
-
-  final Nats _connection;
-
-  Stream<Message> _onMessage;
-  Stream<Message> get onMessage => _onMessage;
-
-  Subscription._(
-      this._connection, this.subscriptionId, this.subject, this.queueGroup) {
-    _onMessage = _controller.stream.asBroadcastStream();
-  }
-
-  // TODO automatic unsubscribe
-
-  /// Stop listening to the subject
-  Future<void> unsubscribe() async {
-    await _controller.close();
-    await _connection._unsubscribe(this);
-  }
-
-  /// Indicates whether the subscription is still active. This will return false
-  /// if the subscription has already been closed.
-  bool get isValid => _controller.isClosed;
-}
-
-/// A connection to a NATS server.
-///
-/// Use [publish] method to publish messages to NATS server.
-/// Use [subscribe] method to subscribe to messages.
-abstract class Nats {
-  Future<void> publish(
-      String subject, /* String | Iterable<int> | dynamic */ data,
-      {String replyTo});
-
-  /// Subs
-  Future<Subscription> subscribe(String subject, {String queueGroup});
-
-  static Future<Nats> connect(
-      {ConnectionOptions options: const ConnectionOptions()}) async {
-    var ret = NatsImpl(options);
-    await ret._waitForConnection();
-    return ret;
-  }
-
-  Future<void> _unsubscribe(Subscription subscription);
-}
+part of 'nats.dart';
 
 class NatsImpl implements Nats {
   Comm _comm;
@@ -75,7 +6,7 @@ class NatsImpl implements Nats {
   Future _connectionWaiter;
 
   NatsImpl(this.options) {
-    _onDisconnect();
+    _reconnect();
   }
 
   final ConnectionOptions options;
@@ -83,6 +14,8 @@ class NatsImpl implements Nats {
   ConnectionInfo _info;
 
   ConnectionInfo get info => _info;
+
+  final _subscriptions = <String, Subscription>{};
 
   Future<void> _waitForConnection() async {
     while (_connectionWaiter != null) {
@@ -94,17 +27,28 @@ class NatsImpl implements Nats {
       String subject, /* String | Iterable<int> | dynamic */ data,
       {String replyTo}) async {
     await _waitForConnection();
+    if(_comm == null) throw Exception("Connection is closed!");
     _comm.sendPub(subject, data, replyTo: replyTo);
   }
 
   /// Subs
   Future<Subscription> subscribe(String subject, {String queueGroup}) async {
     await _waitForConnection();
+    if(_comm == null) throw Exception("Connection is closed!");
     String subscriptionId = _newSubscriptionId();
     _comm.sendSub(subscriptionId, subject, queueGroup: queueGroup);
     final sub = Subscription._(this, subscriptionId, subject, queueGroup);
     _subscriptions[subscriptionId] = sub;
     return sub;
+  }
+
+  Future<void> unsubscribe(Subscription subscription) async {
+    if (subscription._connection != this)
+      throw Exception("Subscription doesn't belong to this connection!");
+    if(_comm == null) throw Exception("Connection is closed!");
+    Subscription sub = _subscriptions.remove(subscription.subscriptionId);
+    if (sub == null) return;
+    await _comm.sendUnsub(subscription.subscriptionId);
   }
 
   Future<void> close() async {
@@ -119,16 +63,6 @@ class NatsImpl implements Nats {
     return ret;
   }
 
-  final _subscriptions = <String, Subscription>{};
-
-  Future<void> _unsubscribe(Subscription subscription) async {
-    if (subscription._connection != this)
-      throw Exception("Subscription doesn't belong to this connection!");
-    Subscription sub = _subscriptions.remove(subscription.subscriptionId);
-    if (sub == null) return;
-    await _comm.sendUnsub(subscription.subscriptionId);
-  }
-
   void _processReceived(WireMsg msg) {
     String subscriptionId = msg.sid;
     Subscription sub = _subscriptions[subscriptionId];
@@ -136,8 +70,7 @@ class NatsImpl implements Nats {
     sub._controller.add(Message(msg.subject, msg.replyTo, msg.payload, sub));
   }
 
-  Future<void> _reconnect(String host, int port) async {
-    print("Trying to reconnect to $host:$port ...");
+  Future<void> _tryToConnect(String host, int port) async {
     Comm comm;
     try {
       comm = await Comm.connect(host: host, port: port);
@@ -157,7 +90,7 @@ class NatsImpl implements Nats {
   }
 
   void _onConnect() {
-    _comm.onDisconnect = _onDisconnect;
+    _comm.onDisconnect = _reconnect;
     for (Subscription sub in _subscriptions.values) {
       if (_comm == null) break;
       _comm.sendSub(sub.subscriptionId, sub.subject,
@@ -166,10 +99,10 @@ class NatsImpl implements Nats {
     _comm.onMessage.listen(_processReceived); // TODO subscribe
   }
 
-  Future<void> _onDisconnect() async {
+  Future<void> _reconnect() async {
     var completer = Completer();
     _connectionWaiter = completer.future;
-    print("Disconnected! Reconnecting ... ");
+
     Iterable<String> urls;
 
     if (_info != null) {
@@ -181,7 +114,7 @@ class NatsImpl implements Nats {
 
     _comm = null;
 
-    await _reconnect(options.host, options.port);
+    await _tryToConnect(options.host, options.port);
 
     if (_comm != null) {
       await _onConnect();
@@ -192,7 +125,7 @@ class NatsImpl implements Nats {
 
     for (String connStr in urls) {
       Iterable<String> parts = connStr.split(':');
-      await _reconnect(parts.first, int.tryParse(parts.last));
+      await _tryToConnect(parts.first, int.tryParse(parts.last));
       if (_comm != null) {
         await _onConnect();
         completer.complete();

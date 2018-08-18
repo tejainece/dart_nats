@@ -3,7 +3,6 @@
 /// More dartdocs go here.
 library nats;
 
-export 'src/nats.dart';
-export 'src/wire.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'info/info.dart';
+export 'info/options.dart';
+export 'nats/nats.dart';

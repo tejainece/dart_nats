@@ -4,16 +4,17 @@ import 'dart:convert';
 
 import 'handlers.dart';
 
+import 'package:nats_dart/info/info.dart';
+
 export 'handlers.dart' show WireMsg;
 
-part 'connection_info.dart';
-part 'connection_options.dart';
+export 'package:nats_dart/info/info.dart';
+export 'package:nats_dart/info/options.dart';
 
 class Comm {
   final Socket _socket;
   final _buffer = List<int>(); // TODO replace with circular buffer
   StreamSubscription _socketListener;
-  // final ConnectionOptions connectionOptions;
 
   final _infoEmitter = StreamController<ConnectionInfo>();
   Stream<ConnectionInfo> _onInfo;
@@ -163,7 +164,7 @@ class Comm {
             await _sendPong();
           } else if (_handler is InfoHandler) {
             String payload = (_handler as InfoHandler).info;
-            _infoEmitter.add(ConnectionInfo()..fromMap(json.decode(payload)));
+            _infoEmitter.add(ConnectionInfo.fromMap(json.decode(payload)));
           }
           _handler = null;
         }
