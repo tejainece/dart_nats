@@ -6,178 +6,46 @@ import 'handlers.dart';
 
 export 'handlers.dart' show WireMsg;
 
-class ConnectionOptions {
-  final bool verbose;
-
-  final bool pedantic;
-
-  final bool sslRequired;
-
-  final String authToken;
-
-  final String user;
-
-  final String pass;
-
-  final String name;
-
-  final String lang;
-
-  final String version;
-
-  final int protocol;
-
-  final bool echo;
-
-  const ConnectionOptions(
-      {this.verbose: false,
-      this.pedantic: false,
-      this.sslRequired: false,
-      this.authToken,
-      this.user,
-      this.pass,
-      this.name,
-      this.lang: 'Dart',
-      this.version: "2.0.0",
-      this.protocol: 1,
-      this.echo: false});
-
-  bool get hasAuth => authToken != null || (user != null && pass != null);
-
-  Map<String, dynamic> toJson() {
-    final ret = <String, dynamic>{};
-
-    if (!verbose) ret['verbose'] = false;
-    if (!pedantic) ret['pedantic'] = false;
-    if (!pedantic) ret['pedantic'] = false;
-    ret['ssl_required'] = sslRequired;
-    if (authToken != null) ret['auth_token'] = authToken;
-    if (user != null) ret['user'] = user;
-    if (pass != null) ret['pass'] = pass;
-    if (name != null) ret['name'] = name;
-    if (lang != null) ret['lang'] = lang;
-    if (version != null) ret['version'] = version;
-    if (protocol != null) ret['protocol'] = protocol;
-    if (echo != null) ret['echo'] = echo;
-
-    return ret;
-  }
-}
-
-class ConnectionInfo {
-  /// The unique identifier of the NATS server
-  String _serverId;
-
-  /// The version of the NATS server
-  String _version;
-
-  /// The version of golang the NATS server was built with
-  String _go;
-
-  /// The IP address of the NATS server host
-  String _host;
-
-  /// The port number the NATS server is configured to listen on
-  int _port;
-
-  /// If this is set, then the client should try to authenticate upon connect.
-  bool _authRequired;
-
-  /// If this is set, then the client must authenticate using SSL.
-  bool _sslRequired;
-
-  /// Maximum payload size that the server will accept from the client.
-  int _maxPayload;
-
-  /// An optional list of server urls that a client can connect to.
-  List<String> _connectUrls;
-
-  /// An integer indicating the protocol version of the server. The server
-  /// version 1.2.0 sets this to 1 to indicate that it supports the “Echo” feature.
-  int _proto;
-
-  /// An optional unsigned integer (64 bits) representing the internal client
-  /// identifier in the server. This can be used to filter client connections in
-  /// monitoring, correlate with error logs, etc…
-  int _clientId;
-
-  /// The unique identifier of the NATS server
-  String get serverId => _serverId;
-
-  /// The version of the NATS server
-  String get version => _version;
-
-  /// The version of golang the NATS server was built with
-  String get go => _go;
-
-  /// The IP address of the NATS server host
-  String get host => _host;
-
-  /// The port number the NATS server is configured to listen on
-  int get port => _port;
-
-  /// If this is set, then the client should try to authenticate upon connect.
-  bool get authRequired => _authRequired;
-
-  /// If this is set, then the client must authenticate using SSL.
-  bool get sslRequired => _sslRequired;
-
-  /// Maximum payload size that the server will accept from the client.
-  int get maxPayload => _maxPayload;
-
-  /// An optional list of server urls that a client can connect to.
-  Iterable<String> get connectUrls => _connectUrls;
-
-  /// An integer indicating the protocol version of the server. The server
-  /// version 1.2.0 sets this to 1 to indicate that it supports the “Echo” feature.
-  int get proto => _proto;
-
-  /// An optional unsigned integer (64 bits) representing the internal client
-  /// identifier in the server. This can be used to filter client connections in
-  /// monitoring, correlate with error logs, etc…
-  int get clientId => _clientId;
-
-  void fromMap(Map<String, dynamic> map) {
-    _serverId = map['server_id'];
-    _version = map['version'];
-    _go = map['go'];
-    _host = map['host'];
-    _port = map['port'];
-    _authRequired = map['auth_required'];
-    _sslRequired = map['ssl_required'];
-    _maxPayload = map['max_payload'];
-    _connectUrls = map['connect_urls'];
-    _proto = map['proto'];
-    _clientId = map['client_id'];
-  }
-}
+part 'connection_info.dart';
+part 'connection_options.dart';
 
 class Comm {
-  Socket _socket;
+  final Socket _socket;
   final _buffer = List<int>(); // TODO replace with circular buffer
   StreamSubscription _socketListener;
-  BigInt _idGen = BigInt.one;
-  final ConnectionOptions connectionOptions;
-  final _connected = Completer<Comm>();
-  Future get whenConnected => _connected.future;
-  final connectionInfo = ConnectionInfo();
+  // final ConnectionOptions connectionOptions;
+
+  final _infoEmitter = StreamController<ConnectionInfo>();
+  Stream<ConnectionInfo> _onInfo;
+  Stream<ConnectionInfo> get onInfo => _onInfo;
+
   final _msgEmitter = StreamController<WireMsg>();
   Stream<WireMsg> _onMessage;
   Stream<WireMsg> get onMessage => _onMessage;
 
-  Comm._(this._socket, this.connectionOptions) {
+  Function onDisconnect;
+
+  Comm._(this._socket, {this.onDisconnect}) {
     _onMessage = _msgEmitter.stream.asBroadcastStream();
-    _socketListener = _socket.listen(_handleRx);
+    _onInfo = _infoEmitter.stream.asBroadcastStream();
+    _socketListener =
+        _socket.listen(_handleRx, cancelOnError: true, onDone: _disconnected);
+  }
+
+  Future<void> _disconnected() async {
+    if (_socketListener != null) {
+      await _socketListener.cancel();
+      _socketListener = null;
+    }
+    if (onDisconnect != null) onDisconnect();
   }
 
   static Future<Comm> connect(
-      {String host: 'localhost',
-      int port: 4222,
-      ConnectionOptions options: const ConnectionOptions()}) async {
-    final socket = await Socket.connect(host, port);
+      {String host: 'localhost', int port: 4222}) async {
+    Socket socket =
+        await Socket.connect(host, port, timeout: Duration(seconds: 5));
     socket.encoding = utf8;
-    final ret = Comm._(socket, options);
-    await ret.whenConnected;
+    final ret = Comm._(socket);
     return ret;
   }
 
@@ -185,71 +53,77 @@ class Comm {
     try {
       await _socket.close();
     } catch (e) {}
-    try {
-      await _socketListener.cancel();
-    } catch (e) {}
-    _socket = null;
+    if (_socketListener != null) {
+      try {
+        await _socketListener.cancel();
+      } catch (e) {}
+    }
     _socketListener = null;
   }
 
-  Future<void> _sendConnect() async {
-    String payload = json.encode(connectionOptions.toJson());
-    _socket.write('CONNECT ');
-    _socket.write(payload);
-    _socket.write('\r\n');
-    // await _socket.flush();
-  }
-
-  Future<void> sendPub(
-      String subject, /* String | Iterable<int> | dynamic */ payload,
-      {String replyTo}) async {
-    Iterable<int> bytes;
-    if (payload is String) {
-      bytes = utf8.encode(payload);
-    } else if (payload is Iterable<int>) {
-      bytes = bytes;
-    } else if (payload != null) {
-      bytes = utf8.encode(payload.toString());
-    } else {
-      bytes = <int>[];
+  bool _trySend(Function func) {
+    if (_socketListener == null) return false;
+    try {
+      func();
+    } catch (e) {
+      return false;
     }
-    _socket.write('PUB $subject ');
-    if (replyTo != null) _socket.write('$replyTo ');
-    _socket.write(bytes.length);
-    _socket.write('\r\n');
-    _socket.add(bytes);
-    _socket.write('\r\n');
-    // await _socket.flush();
+    return true;
   }
 
-  String _newSubscriptionId() {
-    String ret = _idGen.toString();
-    _idGen = _idGen + BigInt.one;
-    return ret;
+  bool sendConnect(String options) {
+    return _trySend(() {
+      _socket.write('CONNECT ');
+      _socket.write(options);
+      _socket.write('\r\n');
+    });
+  }
+
+  bool sendPub(String subject, /* String | Iterable<int> | dynamic */ payload,
+      {String replyTo}) {
+    return _trySend(() {
+      Iterable<int> bytes;
+      if (payload is String) {
+        bytes = utf8.encode(payload);
+      } else if (payload is Iterable<int>) {
+        bytes = bytes;
+      } else if (payload != null) {
+        bytes = utf8.encode(payload.toString());
+      } else {
+        bytes = <int>[];
+      }
+      _socket.write('PUB $subject ');
+      if (replyTo != null) _socket.write('$replyTo ');
+      _socket.write(bytes.length);
+      _socket.write('\r\n');
+      _socket.add(bytes);
+      _socket.write('\r\n');
+    });
   }
 
   /// Sends a 'SUB' subscription message and returns the subscription id
-  Future<String> sendSub(String subject, {String queueGroup}) async {
-    _socket.write('SUB $subject ');
-    if (queueGroup != null) _socket.write('$queueGroup ');
-    final String subscriptionId = _newSubscriptionId();
-    _socket.write(subscriptionId);
-    _socket.write('\r\n');
-    // await _socket.flush();
-    return subscriptionId;
+  bool sendSub(String subscriptionId, String subject, {String queueGroup}) {
+    return _trySend(() {
+      _socket.write('SUB $subject ');
+      if (queueGroup != null) _socket.write('$queueGroup ');
+      _socket.write(subscriptionId);
+      _socket.write('\r\n');
+    });
   }
 
-  Future<void> sendUnsub(String subscriptionId, {int maxMsgs}) async {
-    _socket.write('UNSUB $subscriptionId');
-    if (maxMsgs != null) _socket.write(' $maxMsgs');
-    _socket.write('\r\n');
-    // await _socket.flush();
+  bool sendUnsub(String subscriptionId, {int maxMsgs}) {
+    return _trySend(() {
+      _socket.write('UNSUB $subscriptionId');
+      if (maxMsgs != null) _socket.write(' $maxMsgs');
+      _socket.write('\r\n');
+    });
   }
 
-  Future<void> _sendPong() async {
-    _socket.write('PONG');
-    _socket.write('\r\n');
-    // await _socket.flush();
+  bool _sendPong() {
+    return _trySend(() {
+      _socket.write('PONG');
+      _socket.write('\r\n');
+    });
   }
 
   Handler _handler;
@@ -289,11 +163,7 @@ class Comm {
             await _sendPong();
           } else if (_handler is InfoHandler) {
             String payload = (_handler as InfoHandler).info;
-            connectionInfo.fromMap(json.decode(payload));
-            if (!_connected.isCompleted) {
-              await _sendConnect();
-              _connected.complete(this);
-            }
+            _infoEmitter.add(ConnectionInfo()..fromMap(json.decode(payload)));
           }
           _handler = null;
         }

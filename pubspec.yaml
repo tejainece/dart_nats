@@ -1,8 +1,8 @@
-name: nats
-description: A starting point for Dart libraries or applications.
-# version: 1.0.0
-# homepage: https://www.example.com
-# author: teja <email@example.com>
+name: nats_dart
+description: NATS client for Dart.
+version: 2.0.0
+homepage: https://github.com/tejainece/dart_nats
+author: Ravi Teja Gudapati <tejainece@gmail.com>
 
 environment:
   sdk: '>=2.0.0-dev.65 <3.0.0'

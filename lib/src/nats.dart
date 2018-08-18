@@ -60,36 +60,48 @@ abstract class Nats {
   Future<Subscription> subscribe(String subject, {String queueGroup});
 
   static Future<Nats> connect(
-      {String host: 'localhost',
-      int port: 4222,
-      ConnectionOptions options: const ConnectionOptions()}) async {
-    Comm comm = await Comm.connect(host: host, port: port, options: options);
-    return NatsImpl(comm);
+      {ConnectionOptions options: const ConnectionOptions()}) async {
+    var ret = NatsImpl(options);
+    await ret._waitForConnection();
+    return ret;
   }
 
   Future<void> _unsubscribe(Subscription subscription);
 }
 
 class NatsImpl implements Nats {
-  final Comm _comm;
+  Comm _comm;
+  BigInt _idGen = BigInt.one;
+  Future _connectionWaiter;
 
-  NatsImpl(this._comm) {
-    _comm.onMessage.listen(_processReceived);
+  NatsImpl(this.options) {
+    _onDisconnect();
   }
 
-  ConnectionOptions get options => _comm.connectionOptions;
+  final ConnectionOptions options;
 
-  ConnectionInfo get info => _comm.connectionInfo;
+  ConnectionInfo _info;
+
+  ConnectionInfo get info => _info;
+
+  Future<void> _waitForConnection() async {
+    while (_connectionWaiter != null) {
+      await _connectionWaiter;
+    }
+  }
 
   Future<void> publish(
-          String subject, /* String | Iterable<int> | dynamic */ data,
-          {String replyTo}) =>
-      _comm.sendPub(subject, data, replyTo: replyTo);
+      String subject, /* String | Iterable<int> | dynamic */ data,
+      {String replyTo}) async {
+    await _waitForConnection();
+    _comm.sendPub(subject, data, replyTo: replyTo);
+  }
 
   /// Subs
   Future<Subscription> subscribe(String subject, {String queueGroup}) async {
-    String subscriptionId =
-        await _comm.sendSub(subject, queueGroup: queueGroup);
+    await _waitForConnection();
+    String subscriptionId = _newSubscriptionId();
+    _comm.sendSub(subscriptionId, subject, queueGroup: queueGroup);
     final sub = Subscription._(this, subscriptionId, subject, queueGroup);
     _subscriptions[subscriptionId] = sub;
     return sub;
@@ -98,9 +110,13 @@ class NatsImpl implements Nats {
   Future<void> close() async {
     try {
       await _comm.close();
-    } catch(e) {}
+    } catch (e) {}
+  }
 
-    // TODO close all subscriptions
+  String _newSubscriptionId() {
+    String ret = _idGen.toString();
+    _idGen = _idGen + BigInt.one;
+    return ret;
   }
 
   final _subscriptions = <String, Subscription>{};
@@ -118,5 +134,73 @@ class NatsImpl implements Nats {
     Subscription sub = _subscriptions[subscriptionId];
     if (sub == null) return;
     sub._controller.add(Message(msg.subject, msg.replyTo, msg.payload, sub));
+  }
+
+  Future<void> _reconnect(String host, int port) async {
+    print("Trying to reconnect to $host:$port ...");
+    Comm comm;
+    try {
+      comm = await Comm.connect(host: host, port: port);
+    } catch (e) {
+      return;
+    }
+    ConnectionInfo info;
+    try {
+      info = await comm.onInfo.first.timeout(Duration(seconds: 5));
+      comm.sendConnect(json.encode(options.toJson()));
+    } catch (e) {
+      await comm.close();
+      return;
+    }
+    _comm = comm;
+    _info = info;
+  }
+
+  void _onConnect() {
+    _comm.onDisconnect = _onDisconnect;
+    for (Subscription sub in _subscriptions.values) {
+      if (_comm == null) break;
+      _comm.sendSub(sub.subscriptionId, sub.subject,
+          queueGroup: sub.queueGroup);
+    }
+    _comm.onMessage.listen(_processReceived); // TODO subscribe
+  }
+
+  Future<void> _onDisconnect() async {
+    var completer = Completer();
+    _connectionWaiter = completer.future;
+    print("Disconnected! Reconnecting ... ");
+    Iterable<String> urls;
+
+    if (_info != null) {
+      urls = _info.connectUrls;
+      _info = null;
+    } else {
+      urls = [];
+    }
+
+    _comm = null;
+
+    await _reconnect(options.host, options.port);
+
+    if (_comm != null) {
+      await _onConnect();
+      completer.complete();
+      _connectionWaiter = null;
+      return;
+    }
+
+    for (String connStr in urls) {
+      Iterable<String> parts = connStr.split(':');
+      await _reconnect(parts.first, int.tryParse(parts.last));
+      if (_comm != null) {
+        await _onConnect();
+        completer.complete();
+        _connectionWaiter = null;
+        return;
+      }
+    }
+
+    throw Exception("NATS_Dart: No server to connect!");
   }
 }
